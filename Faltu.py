@@ -46,7 +46,7 @@ SESSION_BACKUP_DIR = None
 
 # Public template URL (standard 64x64 Minecraft skin template).
 # If download fails, a blank 64x64 RGBA template is generated instead.
-TEMPLATE_URL = "https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.20.2/assets/minecraft/textures/entity/player/wide/steve.png"
+TEMPLATE_URL = "https://github.com/ecoson16/Faltu/blob/main/skinTemplate.png"
 
 
 def ensure_folders():
@@ -1149,6 +1149,93 @@ def run_sky():
 
 
 # ============================================================
+#                     FILE CONTENT REPLACER
+# ============================================================
+
+def run_file_content_replacer():
+    """Replace the content of recursively found files using a user-provided text file."""
+    print("\n--- File Content Replacer ---")
+    print("Provide a .txt file containing the replacement content.")
+    print("Then choose the file extension whose contents should be replaced.")
+    print("Example extension: .license or license")
+    print("0. Back")
+
+    source_path = input("Source .txt file path: ").strip()
+
+    if source_path == "0":
+        return
+
+    if not source_path:
+        print("No source file provided.")
+        return
+
+    source_path = os.path.abspath(os.path.expanduser(source_path))
+
+    if not os.path.isfile(source_path):
+        print(f"File not found: {source_path}")
+        return
+
+    try:
+        with open(source_path, "r", encoding="utf-8") as f:
+            replacement_content = f.read()
+    except Exception as e:
+        print(f"Could not read source file: {e}")
+        return
+
+    extension = input("Target file extension (e.g. .license): ").strip()
+
+    if extension == "0":
+        return
+
+    if not extension:
+        print("No extension provided.")
+        return
+
+    if not extension.startswith("."):
+        extension = "." + extension
+
+    # Prevent accidental wildcard-like input.
+    if any(char in extension for char in "*?/\\"):
+        print("Invalid file extension.")
+        return
+
+    matches = []
+    for path in Path(".").rglob(f"*{extension}"):
+        if path.is_file():
+            # Never overwrite the source text file if it happens to match.
+            if os.path.abspath(str(path)) != source_path:
+                matches.append(path)
+
+    if not matches:
+        print(f"No files with extension '{extension}' found.")
+        return
+
+    print(f"\nFound {len(matches)} file(s):")
+    for path in matches:
+        print(f"  {path}")
+
+    if not confirm(f"Replace the content of {len(matches)} file(s) with '{os.path.basename(source_path)}'?"):
+        return
+
+    print()
+
+    success = 0
+    failed = 0
+
+    for path in matches:
+        try:
+            backup_file(str(path))
+            path.write_text(replacement_content, encoding="utf-8")
+            print(f"Updated: {path}")
+            success += 1
+        except Exception as e:
+            print(f"Failed: {path} -> {e}")
+            failed += 1
+
+    print(f"\nCompleted: {success} updated, {failed} failed.")
+
+
+# ============================================================
 #                    SETTINGS MENU
 # ============================================================
 
@@ -1236,6 +1323,7 @@ def main():
         print("9.  Share files (Filebin)")
         print("10. Shorten link")
         print("11. Settings")
+        print("12. Replace file contents")
         print("0.  Exit")
         choice = input("Choice: ").strip()
 
@@ -1264,6 +1352,8 @@ def main():
             run_tinyurl()
         elif choice == "11":
             run_settings()
+        elif choice == "12":
+            run_file_content_replacer()
         else:
             print("Invalid.")
 
