@@ -1,56 +1,87 @@
 #!/usr/bin/env python3
 """
-Utility toolkit: image recolor, mcskinart gen, mcsky gen, mojang lookups,
-image compress, filebin upload, link shortener.
+Faltu – utility toolkit by Ecoson.
+
+Features:
+  • Image recolor (hue shift / tint)
+  • Minecraft skin-art generator
+  • Minecraft sky-pack generator
+  • Mojang / NameMC lookups & skin download
+  • Image compression (Tinify)
+  • Filebin upload
+  • TinyURL shortener
+  • Recursive file-content replacer
 """
 
-import os
-import sys
-import json
+from __future__ import annotations
+
 import base64
-import shutil
+import json
+import os
 import random
+import shutil
 import string
-import webbrowser
-import urllib.request
+import sys
 import urllib.error
+import urllib.request
+import webbrowser
 from datetime import datetime
+from pathlib import Path
+from typing import Iterable, Optional
 
 from PIL import Image
 
-# ============================================================
-#                    GLOBAL SESSION STATE
-# ============================================================
+# ---------------------------------------------------------------------------
+# Paths & constants
+# ---------------------------------------------------------------------------
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FALTU_DIR = os.path.join(SCRIPT_DIR, "faltu")
-BACKUP_DIR = os.path.join(FALTU_DIR, "backup")
-INPUT_DIR = os.path.join(FALTU_DIR, "input")
-OUTPUT_DIR = os.path.join(FALTU_DIR, "output")
-CONFIG_DIR = os.path.join(FALTU_DIR, "config")
-RESOURCES_DIR = os.path.join(CONFIG_DIR, "resources")
-TEXT_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "text_output")
-CREDENTIALS_PATH = os.path.join(CONFIG_DIR, "credentials.txt")
-SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.txt")
-TEMPLATE_PATH = os.path.join(RESOURCES_DIR, "skinTemplate.png")
+SCRIPT_DIR = Path(__file__).resolve().parent
+FALTU_DIR = SCRIPT_DIR / "faltu"
+BACKUP_DIR = FALTU_DIR / "backup"
+INPUT_DIR = FALTU_DIR / "input"
+OUTPUT_DIR = FALTU_DIR / "output"
+CONFIG_DIR = FALTU_DIR / "config"
+RESOURCES_DIR = CONFIG_DIR / "resources"
+TEXT_OUTPUT_DIR = OUTPUT_DIR / "text_output"
 
-# Text log files
-USERNAME_LOG = os.path.join(TEXT_OUTPUT_DIR, "username.txt")
-UUID_LOG = os.path.join(TEXT_OUTPUT_DIR, "uuid.txt")
-BIN_LOG = os.path.join(TEXT_OUTPUT_DIR, "bin.txt")
-LINK_LOG = os.path.join(TEXT_OUTPUT_DIR, "link.txt")
-NAMEMC_LOG = os.path.join(TEXT_OUTPUT_DIR, "namemc.txt")
+CREDENTIALS_PATH = CONFIG_DIR / "credentials.txt"
+SETTINGS_PATH = CONFIG_DIR / "settings.txt"
+TEMPLATE_PATH = RESOURCES_DIR / "skinTemplate.png"
 
-SESSION_ID = None
-SESSION_BACKUP_DIR = None
+USERNAME_LOG = TEXT_OUTPUT_DIR / "username.txt"
+UUID_LOG = TEXT_OUTPUT_DIR / "uuid.txt"
+BIN_LOG = TEXT_OUTPUT_DIR / "bin.txt"
+LINK_LOG = TEXT_OUTPUT_DIR / "link.txt"
+NAMEMC_LOG = TEXT_OUTPUT_DIR / "namemc.txt"
 
-# Public template URL (standard 64x64 Minecraft skin template).
-# If download fails, a blank 64x64 RGBA template is generated instead.
-TEMPLATE_URL = "https://github.com/ecoson16/Faltu/blob/main/skinTemplate.png"
+# Raw GitHub URL (blob page would return HTML)
+TEMPLATE_URL = (
+    "https://raw.githubusercontent.com/ecoson16/Faltu/main/skinTemplate.png"
+)
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
+
+SESSION_ID: Optional[str] = None
+SESSION_BACKUP_DIR: Optional[Path] = None
+
+SKY_ASSET_NAMES = (
+    "skybox.png",
+    "skybox2.png",
+    "cloud1.png",
+    "cloud2.png",
+    "starfield01.png",
+    "starfield02.png",
+    "starfield03.png",
+    "starfield.png",
+)
+
+# ---------------------------------------------------------------------------
+# Folder / session helpers
+# ---------------------------------------------------------------------------
 
 
-def ensure_folders():
-    """Create required folders and files only if they do not already exist."""
+def ensure_folders() -> None:
+    """Create required folders and empty config/log files if missing."""
     for path in (
         FALTU_DIR,
         BACKUP_DIR,
@@ -60,140 +91,134 @@ def ensure_folders():
         RESOURCES_DIR,
         TEXT_OUTPUT_DIR,
     ):
-        if not os.path.isdir(path):
-            os.makedirs(path, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
 
-    if not os.path.isfile(CREDENTIALS_PATH):
-        with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
-            f.write("# API keys – remove the # before editing manually (Not from this line)\n")
-            f.write("# tinify_api_key=\n")
-            f.write("# tinyurl_api_key=\n")
+    if not CREDENTIALS_PATH.is_file():
+        CREDENTIALS_PATH.write_text(
+            "# API keys – one key=value per line\n"
+            "# tinify_api_key=\n"
+            "# tinyurl_api_key=\n",
+            encoding="utf-8",
+        )
 
-    if not os.path.isfile(SETTINGS_PATH):
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            f.write("# Custom folders - remove the # before editing manually (Not from this line)\n")
-            f.write("# input_folder=\n")
-            f.write("# output_folder=\n")
+    if not SETTINGS_PATH.is_file():
+        SETTINGS_PATH.write_text(
+            "# Custom folders – one key=value per line\n"
+            "# input_folder=\n"
+            "# output_folder=\n",
+            encoding="utf-8",
+        )
 
-    # Text output logs
-    for log_path in (USERNAME_LOG, UUID_LOG, BIN_LOG, LINK_LOG, NAMEMC_LOG):
-        if not os.path.isfile(log_path):
-            with open(log_path, "w", encoding="utf-8") as f:
-                f.write("")
+    for log in (USERNAME_LOG, UUID_LOG, BIN_LOG, LINK_LOG, NAMEMC_LOG):
+        if not log.is_file():
+            log.write_text("", encoding="utf-8")
 
-    # Skin template
-    if not os.path.isfile(TEMPLATE_PATH):
+    if not TEMPLATE_PATH.is_file():
         _download_or_create_template()
 
 
-def _download_or_create_template():
-    """Download the skin template; on failure create a blank 64x64 RGBA image."""
+def _download_or_create_template() -> None:
+    """Fetch the 64×64 skin template; fall back to a blank RGBA image."""
     try:
         req = urllib.request.Request(
             TEMPLATE_URL, headers={"User-Agent": "Mozilla/5.0"}
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = resp.read()
-        with open(TEMPLATE_PATH, "wb") as f:
-            f.write(data)
-        # Validate it is a usable image
+        TEMPLATE_PATH.write_bytes(data)
         with Image.open(TEMPLATE_PATH) as img:
             img.load()
         print(f"Downloaded skin template → {TEMPLATE_PATH}")
-    except Exception as e:
-        print(f"Template download failed ({e}); creating blank 64x64 template.")
-        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        img.save(TEMPLATE_PATH, "PNG")
+    except Exception as exc:
+        print(f"Template download failed ({exc}); creating blank 64×64 template.")
+        Image.new("RGBA", (64, 64), (0, 0, 0, 0)).save(TEMPLATE_PATH, "PNG")
 
 
-def init_session():
-    """Create a single session backup folder for this script run (lazy)."""
+def init_session() -> None:
+    """Lazily create a session backup folder for this run."""
     global SESSION_ID, SESSION_BACKUP_DIR
     if SESSION_ID is not None:
         return
     SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
-    SESSION_BACKUP_DIR = os.path.join(BACKUP_DIR, f"session_{SESSION_ID}")
-    os.makedirs(SESSION_BACKUP_DIR, exist_ok=True)
+    SESSION_BACKUP_DIR = BACKUP_DIR / f"session_{SESSION_ID}"
+    SESSION_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def backup_file(src_path):
-    """Copy a file into the current session backup folder. Only called after confirmation."""
+def backup_file(src: Path | str) -> None:
+    """Copy a file into the current session backup folder."""
     init_session()
-    if not os.path.isfile(src_path):
+    src = Path(src)
+    if not src.is_file() or SESSION_BACKUP_DIR is None:
         return
-    name = os.path.basename(src_path)
-    dest = os.path.join(SESSION_BACKUP_DIR, name)
-    if os.path.exists(dest):
-        base, ext = os.path.splitext(name)
+    dest = SESSION_BACKUP_DIR / src.name
+    if dest.exists():
+        stem, suffix = src.stem, src.suffix
         n = 1
-        while os.path.exists(dest):
-            dest = os.path.join(SESSION_BACKUP_DIR, f"{base}_{n}{ext}")
+        while dest.exists():
+            dest = SESSION_BACKUP_DIR / f"{stem}_{n}{suffix}"
             n += 1
     try:
-        shutil.copy2(src_path, dest)
-    except Exception as e:
-        print(f"Warning: backup failed for {name}: {e}")
+        shutil.copy2(src, dest)
+    except Exception as exc:
+        print(f"Warning: backup failed for {src.name}: {exc}")
 
 
-def confirm(prompt="Continue?"):
-    """Ask for yes/no confirmation. Returns True on yes."""
+def confirm(prompt: str = "Continue?") -> bool:
     ans = input(f"{prompt} [Y/n]: ").strip().lower()
     return ans in ("", "y", "yes")
 
 
-def append_log(log_path, line):
-    """Append a single line to a text log file."""
+def append_log(log_path: Path, line: str) -> None:
     try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(line.rstrip() + "\n")
-    except Exception as e:
-        print(f"Warning: could not write log: {e}")
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(line.rstrip() + "\n")
+    except Exception as exc:
+        print(f"Warning: could not write log: {exc}")
 
 
-def now_stamp():
+def now_stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-# ============================================================
-#                    CONFIG / CREDENTIALS
-# ============================================================
+# ---------------------------------------------------------------------------
+# Config / credentials
+# ---------------------------------------------------------------------------
 
-def _parse_kv_file(path):
-    data = {}
-    if not os.path.isfile(path):
+
+def _parse_kv_file(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    if not path.is_file():
         return data
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    data[k.strip()] = v.strip()
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key.strip()] = value.strip()
     except Exception:
         pass
     return data
 
 
-def _write_kv_file(path, data, header_lines=None):
-    lines = []
-    if header_lines:
-        lines.extend(header_lines)
-    for k, v in data.items():
-        lines.append(f"{k}={v}")
+def _write_kv_file(
+    path: Path,
+    data: dict[str, str],
+    header_lines: Optional[list[str]] = None,
+) -> None:
+    lines = list(header_lines or [])
+    lines.extend(f"{k}={v}" for k, v in data.items())
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-    except Exception as e:
-        print(f"Warning: could not write {os.path.basename(path)}: {e}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception as exc:
+        print(f"Warning: could not write {path.name}: {exc}")
 
 
-def load_credentials():
+def load_credentials() -> dict[str, str]:
     return _parse_kv_file(CREDENTIALS_PATH)
 
 
-def save_credential(key, value):
+def save_credential(key: str, value: str) -> None:
     data = load_credentials()
     data[key] = value
     _write_kv_file(
@@ -207,11 +232,11 @@ def save_credential(key, value):
     )
 
 
-def load_settings():
+def load_settings() -> dict[str, str]:
     return _parse_kv_file(SETTINGS_PATH)
 
 
-def save_setting(key, value):
+def save_setting(key: str, value: str) -> None:
     data = load_settings()
     data[key] = value
     _write_kv_file(
@@ -225,57 +250,52 @@ def save_setting(key, value):
     )
 
 
-def get_effective_input_dir():
-    settings = load_settings()
-    custom = settings.get("input_folder", "").strip()
-    if custom and os.path.isdir(custom):
-        return custom
+def get_effective_input_dir() -> Path:
+    custom = load_settings().get("input_folder", "").strip()
+    if custom and Path(custom).is_dir():
+        return Path(custom)
     return INPUT_DIR
 
 
-def get_effective_output_dir():
-    settings = load_settings()
-    custom = settings.get("output_folder", "").strip()
-    if custom and os.path.isdir(custom):
-        return custom
+def get_effective_output_dir() -> Path:
+    custom = load_settings().get("output_folder", "").strip()
+    if custom and Path(custom).is_dir():
+        return Path(custom)
     return OUTPUT_DIR
 
 
-# ============================================================
-#                         HELPERS
-# ============================================================
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
 
-def list_images(folder):
-    exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
-    if not os.path.isdir(folder):
+
+def list_images(folder: Path) -> list[Path]:
+    if not folder.is_dir():
         return []
-    return sorted([
-        os.path.join(folder, f)
-        for f in os.listdir(folder)
-        if os.path.splitext(f)[1].lower() in exts
-    ])
+    return sorted(
+        p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    )
 
 
-def list_files(folder):
-    if not os.path.isdir(folder):
+def list_files(folder: Path) -> list[Path]:
+    if not folder.is_dir():
         return []
-    return sorted([
-        os.path.join(folder, f)
-        for f in os.listdir(folder)
-        if os.path.isfile(os.path.join(folder, f))
-    ])
+    return sorted(p for p in folder.iterdir() if p.is_file())
 
 
-def ask_files(images_only=False):
+def ask_files(images_only: bool = False) -> Optional[list[Path]]:
     """
-    Prompt for files:
+    Unified 3-option file picker used by every file-based tool.
+
       1. All in input folder
       2. All in script folder
-      3. Specific path(s) separated by , or |
-    Returns list of paths, or None if user cancels / goes back.
+      3. Explicit path(s) (comma or pipe separated)
+
+    Returns a list of Path objects, or None if the user backs out.
     """
     label = "images" if images_only else "files"
     input_dir = get_effective_input_dir()
+
     print(f"\n1. All {label} in input folder ({input_dir})")
     print(f"2. All {label} in script folder ({SCRIPT_DIR})")
     print("3. Enter full path(s)")
@@ -302,19 +322,18 @@ def ask_files(images_only=False):
         return items
 
     if choice == "3":
-        paths = input("Path(s) separated by , or | : ").strip()
-        # Support both , and | as separators (no required spaces)
-        parts = []
+        raw = input("Path(s) separated by , or | : ").strip()
+        parts: list[str] = []
         for sep in (",", "|"):
-            if sep in paths:
-                parts = [p.strip() for p in paths.split(sep) if p.strip()]
+            if sep in raw:
+                parts = [p.strip() for p in raw.split(sep) if p.strip()]
                 break
-        if not parts:
-            parts = [paths] if paths else []
-        items = [p for p in parts if os.path.isfile(p)]
+        if not parts and raw:
+            parts = [raw]
+
+        items = [Path(p).expanduser() for p in parts if Path(p).expanduser().is_file()]
         if images_only:
-            exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
-            items = [p for p in items if os.path.splitext(p)[1].lower() in exts]
+            items = [p for p in items if p.suffix.lower() in IMAGE_EXTS]
         if not items:
             print(f"No valid {label}.")
             return None
@@ -324,10 +343,8 @@ def ask_files(images_only=False):
     return None
 
 
-def ask_output_mode():
-    """
-    Returns "overwrite", "output", or None (back).
-    """
+def ask_output_mode() -> Optional[str]:
+    """Return 'overwrite', 'output', or None (back)."""
     out_dir = get_effective_output_dir()
     print("\n1. Overwrite original files")
     print(f"2. Save to output folder ({out_dir})")
@@ -338,54 +355,52 @@ def ask_output_mode():
     return "overwrite" if choice == "1" else "output"
 
 
-def resolve_output_path(src_path, mode, suffix=""):
+def resolve_output_path(src: Path, mode: str, suffix: str = "") -> Path:
     if mode == "overwrite":
         if not suffix:
-            return src_path
-        base, ext = os.path.splitext(src_path)
-        return f"{base}{suffix}{ext}"
+            return src
+        return src.with_name(f"{src.stem}{suffix}{src.suffix}")
 
     out_dir = get_effective_output_dir()
-    os.makedirs(out_dir, exist_ok=True)
-    name = os.path.basename(src_path)
-    if suffix:
-        base, ext = os.path.splitext(name)
-        name = f"{base}{suffix}{ext}"
-    return os.path.join(out_dir, name)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = f"{src.stem}{suffix}{src.suffix}" if suffix else src.name
+    return out_dir / name
 
 
-def hex_to_rgb(hex_color):
+def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     hex_color = hex_color.strip().lstrip("#")
     if len(hex_color) != 6:
         raise ValueError("Invalid hex")
-    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
 
 
-def normalize_uuid(u):
+def normalize_uuid(u: str) -> str:
     u = u.strip().replace("-", "").lower()
     if len(u) != 32:
         raise ValueError("Invalid UUID")
     return u
 
 
-def format_uuid(u):
+def format_uuid(u: str) -> str:
     u = normalize_uuid(u)
     return f"{u[:8]}-{u[8:12]}-{u[12:16]}-{u[16:20]}-{u[20:]}"
 
 
-def http_get(url):
+def http_get(url: str) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode())
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
 
 
-def http_get_bytes(url):
+def http_get_bytes(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return r.read()
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read()
 
 
-def http_post_json(url, payload, headers=None):
+def http_post_json(
+    url: str, payload: dict, headers: Optional[dict] = None
+) -> dict:
     data = json.dumps(payload).encode("utf-8")
     hdrs = {
         "Content-Type": "application/json",
@@ -395,58 +410,56 @@ def http_post_json(url, payload, headers=None):
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url, data=data, method="POST", headers=hdrs)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode())
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
 
 
-def random_bin(length=8):
+def random_bin(length: int = 8) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 
-def pixel_data(img):
-    if hasattr(img, "get_flattened_data"):
-        return img.get_flattened_data()
-    return img.getdata()
-
-
-def open_preview(path):
+def open_preview(path: Path | str) -> None:
     """Open an image with the system default viewer."""
+    path = str(path)
     try:
         if sys.platform == "win32":
-            os.startfile(path)
+            os.startfile(path)  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
             os.system(f'open "{path}"')
         else:
-            # Linux / other
             for cmd in ("xdg-open", "gio", "gnome-open", "kde-open"):
                 if shutil.which(cmd):
                     os.system(f'{cmd} "{path}" >/dev/null 2>&1 &')
                     return
-            # Fallback: try PIL show (may open via ImageMagick / display)
             with Image.open(path) as im:
                 im.show()
-    except Exception as e:
-        print(f"Could not open preview: {e}")
+    except Exception as exc:
+        print(f"Could not open preview: {exc}")
 
 
-# ============================================================
-#                    MOJANG / NAMEMC
-# ============================================================
+# ---------------------------------------------------------------------------
+# Mojang / NameMC
+# ---------------------------------------------------------------------------
 
-def username_to_uuid(name):
+
+def username_to_uuid(name: str) -> tuple[str, str]:
     data = http_get(f"https://api.mojang.com/users/profiles/minecraft/{name.strip()}")
     return data["id"], data["name"]
 
 
-def uuid_to_username(uuid):
+def uuid_to_username(uuid: str) -> tuple[str, str]:
     uuid = normalize_uuid(uuid)
-    data = http_get(f"https://api.minecraftservices.com/minecraft/profile/lookup/{uuid}")
+    data = http_get(
+        f"https://api.minecraftservices.com/minecraft/profile/lookup/{uuid}"
+    )
     return data["id"], data["name"]
 
 
-def get_textures(uuid):
+def get_textures(uuid: str) -> tuple[dict, str]:
     uuid = normalize_uuid(uuid)
-    data = http_get(f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid}")
+    data = http_get(
+        f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid}"
+    )
     for prop in data.get("properties", []):
         if prop["name"] == "textures":
             decoded = json.loads(base64.b64decode(prop["value"]).decode())
@@ -454,63 +467,64 @@ def get_textures(uuid):
     return {}, data.get("name", "unknown")
 
 
-def download_skin(identifier):
+def download_skin(identifier: str) -> None:
     identifier = identifier.strip()
     try:
         if len(identifier.replace("-", "")) == 32:
             uuid, name = uuid_to_username(identifier)
         else:
             uuid, name = username_to_uuid(identifier)
-    except Exception as e:
-        print(f"Lookup failed: {e}")
+    except Exception as exc:
+        print(f"Lookup failed: {exc}")
         return
+
     print(f"{name} → {format_uuid(uuid)}")
     if not confirm("Download skin/cape?"):
         return
+
     try:
         textures, _ = get_textures(uuid)
-    except Exception as e:
-        print(f"Texture fetch failed: {e}")
+    except Exception as exc:
+        print(f"Texture fetch failed: {exc}")
         return
+
     out_dir = get_effective_output_dir()
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     if "SKIN" in textures:
-        path = os.path.join(out_dir, f"{name}_skin.png")
-        with open(path, "wb") as f:
-            f.write(http_get_bytes(textures["SKIN"]["url"]))
+        path = out_dir / f"{name}_skin.png"
+        path.write_bytes(http_get_bytes(textures["SKIN"]["url"]))
         print(f"Skin: {path}")
     else:
         print("No custom skin.")
+
     if "CAPE" in textures:
-        path = os.path.join(out_dir, f"{name}_cape.png")
-        with open(path, "wb") as f:
-            f.write(http_get_bytes(textures["CAPE"]["url"]))
+        path = out_dir / f"{name}_cape.png"
+        path.write_bytes(http_get_bytes(textures["CAPE"]["url"]))
         print(f"Cape: {path}")
 
 
-def open_namemc(identifier):
+def open_namemc(identifier: str) -> None:
     identifier = identifier.strip()
     try:
         if len(identifier.replace("-", "")) == 32:
             _, name = uuid_to_username(identifier)
         else:
             _, name = username_to_uuid(identifier)
-    except Exception as e:
-        print(f"Lookup failed: {e}")
+    except Exception as exc:
+        print(f"Lookup failed: {exc}")
         return
+
     url = f"https://namemc.com/profile/{name}"
     print(url)
     if confirm("Open in browser and log?"):
         webbrowser.open(url)
-        append_log(
-            NAMEMC_LOG,
-            f"{now_stamp()} - {identifier} -> {url}",
-        )
+        append_log(NAMEMC_LOG, f"{now_stamp()} - {identifier} -> {url}")
 
 
-def run_username_to_uuid():
+def run_username_to_uuid() -> None:
     name = input("Username (or 0 to go back): ").strip()
-    if name == "0" or not name:
+    if name in ("0", ""):
         return
     if not confirm(f"Look up UUID for '{name}'?"):
         return
@@ -519,18 +533,15 @@ def run_username_to_uuid():
         formatted = format_uuid(uuid)
         print(f"{official} → {formatted}")
         print(f"Raw: {uuid}")
-        append_log(
-            USERNAME_LOG,
-            f"{now_stamp()} - {name} -> {formatted}",
-        )
+        append_log(USERNAME_LOG, f"{now_stamp()} - {name} -> {formatted}")
         print(f"Logged to {USERNAME_LOG}")
-    except Exception as e:
-        print(f"Failed: {e}")
+    except Exception as exc:
+        print(f"Failed: {exc}")
 
 
-def run_uuid_to_username():
+def run_uuid_to_username() -> None:
     uuid = input("UUID (or 0 to go back): ").strip()
-    if uuid == "0" or not uuid:
+    if uuid in ("0", ""):
         return
     if not confirm(f"Look up username for '{uuid}'?"):
         return
@@ -538,34 +549,32 @@ def run_uuid_to_username():
         raw, name = uuid_to_username(uuid)
         formatted = format_uuid(raw)
         print(f"{formatted} → {name}")
-        append_log(
-            UUID_LOG,
-            f"{now_stamp()} - {uuid} -> {name}",
-        )
+        append_log(UUID_LOG, f"{now_stamp()} - {uuid} -> {name}")
         print(f"Logged to {UUID_LOG}")
-    except Exception as e:
-        print(f"Failed: {e}")
+    except Exception as exc:
+        print(f"Failed: {exc}")
 
 
-def run_download_skin():
+def run_download_skin() -> None:
     ident = input("Username or UUID (or 0 to go back): ").strip()
-    if ident == "0" or not ident:
+    if ident in ("0", ""):
         return
     download_skin(ident)
 
 
-def run_namemc():
+def run_namemc() -> None:
     ident = input("Username or UUID (or 0 to go back): ").strip()
-    if ident == "0" or not ident:
+    if ident in ("0", ""):
         return
     open_namemc(ident)
 
 
-# ============================================================
-#                         TINIFY
-# ============================================================
+# ---------------------------------------------------------------------------
+# Tinify
+# ---------------------------------------------------------------------------
 
-def run_tinify():
+
+def run_tinify() -> None:
     try:
         import tinify
     except ImportError:
@@ -578,13 +587,14 @@ def run_tinify():
     if key:
         masked = f"{key[:6]}...{key[-4:]}" if len(key) > 10 else key
         print(f"Using saved Tinify API key: {masked}")
-        use_saved = input("Use saved key? [Y/n]: ").strip().lower()
-        if use_saved in ("n", "no"):
+        if input("Use saved key? [Y/n]: ").strip().lower() in ("n", "no"):
             key = ""
 
     if not key:
-        key = input("Tinify API key (https://tinify.com/developers) (or 0 to go back): ").strip()
-        if key == "0" or not key:
+        key = input(
+            "Tinify API key (https://tinify.com/developers) (or 0 to go back): "
+        ).strip()
+        if key in ("0", ""):
             return
         if confirm("Save this API key?"):
             save_credential("tinify_api_key", key)
@@ -593,8 +603,8 @@ def run_tinify():
     tinify.key = key
     try:
         tinify.validate()
-    except Exception as e:
-        print(f"Invalid key or connection error: {e}")
+    except Exception as exc:
+        print(f"Invalid key or connection error: {exc}")
         return
 
     images = ask_files(images_only=True)
@@ -603,23 +613,22 @@ def run_tinify():
     mode = ask_output_mode()
     if mode is None:
         return
-
     if not confirm(f"Compress {len(images)} image(s)?"):
         return
 
     for path in images:
         backup_file(path)
         try:
-            source = tinify.from_file(path)
+            source = tinify.from_file(str(path))
             out = resolve_output_path(
                 path, mode, suffix="_compressed" if mode == "output" else ""
             )
             if mode == "overwrite":
                 out = path
-            source.to_file(out)
-            print(f"Compressed: {os.path.basename(out)}")
-        except Exception as e:
-            print(f"Failed {os.path.basename(path)}: {e}")
+            source.to_file(str(out))
+            print(f"Compressed: {out.name}")
+        except Exception as exc:
+            print(f"Failed {path.name}: {exc}")
 
     try:
         print(f"Compressions this month: {tinify.compression_count}")
@@ -627,32 +636,42 @@ def run_tinify():
         pass
 
 
-# ============================================================
-#                         TINYURL
-# ============================================================
+# ---------------------------------------------------------------------------
+# TinyURL
+# ---------------------------------------------------------------------------
 
-def create_tinyurl(long_url, api_key, domain="tinyurl.com", alias=None):
-    payload = {"url": long_url, "domain": domain}
+
+def create_tinyurl(
+    long_url: str,
+    api_key: str,
+    domain: str = "tinyurl.com",
+    alias: Optional[str] = None,
+) -> dict:
+    payload: dict = {"url": long_url, "domain": domain}
     if alias:
         payload["alias"] = alias
-    headers = {"Authorization": f"Bearer {api_key}"}
-    return http_post_json("https://api.tinyurl.com/create", payload, headers=headers)
+    return http_post_json(
+        "https://api.tinyurl.com/create",
+        payload,
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
 
 
-def run_tinyurl():
+def run_tinyurl() -> None:
     creds = load_credentials()
     key = creds.get("tinyurl_api_key", "").strip()
 
     if key:
         masked = f"{key[:6]}...{key[-4:]}" if len(key) > 10 else key
         print(f"Using saved TinyURL API key: {masked}")
-        use_saved = input("Use saved key? [Y/n]: ").strip().lower()
-        if use_saved in ("n", "no"):
+        if input("Use saved key? [Y/n]: ").strip().lower() in ("n", "no"):
             key = ""
 
     if not key:
-        key = input("TinyURL API key (https://tinyurl.com/app/dev) (or 0 to go back): ").strip()
-        if key == "0" or not key:
+        key = input(
+            "TinyURL API key (https://tinyurl.com/app/dev) (or 0 to go back): "
+        ).strip()
+        if key in ("0", ""):
             return
         if confirm("Save this API key?"):
             save_credential("tinyurl_api_key", key)
@@ -665,7 +684,7 @@ def run_tinyurl():
     if mode == "0":
         return
 
-    urls = []
+    urls: list[str] = []
     if mode == "2":
         print("Enter URLs (empty line to finish):")
         while True:
@@ -696,7 +715,9 @@ def run_tinyurl():
     for long_url in urls:
         try:
             result = create_tinyurl(
-                long_url, key, domain=domain,
+                long_url,
+                key,
+                domain=domain,
                 alias=alias if len(urls) == 1 else None,
             )
             data = result.get("data", {})
@@ -704,29 +725,25 @@ def run_tinyurl():
             if short:
                 print(f"{long_url}")
                 print(f"  → {short}")
-                append_log(
-                    LINK_LOG,
-                    f"{now_stamp()} - {long_url} -> {short}",
-                )
+                append_log(LINK_LOG, f"{now_stamp()} - {long_url} -> {short}")
             else:
                 print(f"Unexpected response for {long_url}: {result}")
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()[:300] if e.fp else ""
-            print(f"Failed {long_url}: HTTP {e.code} - {body}")
-        except Exception as e:
-            print(f"Failed {long_url}: {e}")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode()[:300] if exc.fp else ""
+            print(f"Failed {long_url}: HTTP {exc.code} - {body}")
+        except Exception as exc:
+            print(f"Failed {long_url}: {exc}")
     print(f"Logged to {LINK_LOG}")
 
 
-# ============================================================
-#                         FILEBIN
-# ============================================================
+# ---------------------------------------------------------------------------
+# Filebin
+# ---------------------------------------------------------------------------
 
-def upload_to_filebin(filepath, bin_name):
-    filename = os.path.basename(filepath)
-    url = f"https://filebin.net/{bin_name}/{filename}"
-    with open(filepath, "rb") as f:
-        data = f.read()
+
+def upload_to_filebin(filepath: Path, bin_name: str) -> dict:
+    url = f"https://filebin.net/{bin_name}/{filepath.name}"
+    data = filepath.read_bytes()
     req = urllib.request.Request(
         url,
         data=data,
@@ -741,7 +758,7 @@ def upload_to_filebin(filepath, bin_name):
         return json.loads(resp.read().decode())
 
 
-def run_filebin():
+def run_filebin() -> None:
     bin_name = input("Bin name (leave empty for random, 0 to go back): ").strip()
     if bin_name == "0":
         return
@@ -752,7 +769,6 @@ def run_filebin():
     files = ask_files(images_only=False)
     if files is None:
         return
-
     if not confirm(f"Upload {len(files)} file(s) to bin '{bin_name}'?"):
         return
 
@@ -761,27 +777,24 @@ def run_filebin():
         backup_file(path)
         try:
             upload_to_filebin(path, bin_name)
-            filename = os.path.basename(path)
-            out_url = f"https://filebin.net/{bin_name}/{filename}"
+            out_url = f"https://filebin.net/{bin_name}/{path.name}"
             print(f"Uploaded: {out_url}")
-            append_log(
-                BIN_LOG,
-                f"{now_stamp()} - {path} -> {out_url}",
-            )
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()[:100] if e.fp else ""
-            print(f"Failed {os.path.basename(path)}: HTTP {e.code} - {body}")
-        except Exception as e:
-            print(f"Failed {os.path.basename(path)}: {e}")
+            append_log(BIN_LOG, f"{now_stamp()} - {path} -> {out_url}")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode()[:100] if exc.fp else ""
+            print(f"Failed {path.name}: HTTP {exc.code} - {body}")
+        except Exception as exc:
+            print(f"Failed {path.name}: {exc}")
     print(f"\nBin URL: https://filebin.net/{bin_name}")
     print(f"Logged to {BIN_LOG}")
 
 
-# ============================================================
-#                         RECOLOR
-# ============================================================
+# ---------------------------------------------------------------------------
+# Recolor
+# ---------------------------------------------------------------------------
 
-def get_hue(r, g, b):
+
+def get_hue(r: int, g: int, b: int) -> int:
     mn, mx = min(r, g, b), max(r, g, b)
     if mn == mx:
         return 0
@@ -797,7 +810,7 @@ def get_hue(r, g, b):
     return round(h)
 
 
-def _rgb_to_hsv(r, g, b):
+def _rgb_to_hsv(r: int, g: int, b: int) -> tuple[float, float, float]:
     r, g, b = r / 255.0, g / 255.0, b / 255.0
     mx, mn = max(r, g, b), min(r, g, b)
     df = mx - mn
@@ -813,7 +826,7 @@ def _rgb_to_hsv(r, g, b):
     return h / 360.0, s, mx
 
 
-def _hsv_to_rgb(h, s, v):
+def _hsv_to_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
     if s == 0.0:
         val = int(v * 255)
         return val, val, val
@@ -838,22 +851,22 @@ def _hsv_to_rgb(h, s, v):
     return int(r * 255), int(g * 255), int(b * 255)
 
 
-def tint(img, color):
+def tint(img: Image.Image, color: tuple[int, int, int]) -> Image.Image:
     cr, cg, cb = color
     img = img.convert("RGBA").copy()
     pixels = [
         ((r + cr) // 2, (g + cg) // 2, (b + cb) // 2, a)
-        for r, g, b, a in pixel_data(img)
+        for r, g, b, a in img.getdata()
     ]
     img.putdata(pixels)
     return img
 
 
-def hue_shift(img, i_hue):
+def hue_shift(img: Image.Image, i_hue: int) -> Image.Image:
     hue = i_hue / 360.0
     img = img.convert("RGBA")
     new_pixels = []
-    for r, g, b, a in pixel_data(img):
+    for r, g, b, a in img.getdata():
         if ((r << 16) | (g << 8) | b) != 0x00FFFFFF:
             h, s, v = _rgb_to_hsv(r, g, b)
             nr, ng, nb = _hsv_to_rgb(hue, s, v)
@@ -865,7 +878,7 @@ def hue_shift(img, i_hue):
     return out
 
 
-def run_recolor():
+def run_recolor() -> None:
     print("\n1. Hue Shift")
     print("2. Tint")
     print("0. Back")
@@ -875,6 +888,7 @@ def run_recolor():
     if mode not in ("1", "2"):
         print("Invalid.")
         return
+
     try:
         color = hex_to_rgb(input("Hex color: ").strip())
     except ValueError:
@@ -887,7 +901,6 @@ def run_recolor():
     out_mode = ask_output_mode()
     if out_mode is None:
         return
-
     if not confirm(f"Recolor {len(images)} image(s)?"):
         return
 
@@ -901,22 +914,23 @@ def run_recolor():
                     else tint(img, color)
                 )
                 out_path = resolve_output_path(path, out_mode)
-                if out_path.lower().endswith((".jpg", ".jpeg")):
+                if out_path.suffix.lower() in (".jpg", ".jpeg"):
                     result = result.convert("RGB")
                     result.save(out_path, quality=95)
                 else:
                     result.save(out_path)
-                print(f"Done: {os.path.basename(out_path)}")
-        except Exception as e:
-            print(f"Failed {os.path.basename(path)}: {e}")
+                print(f"Done: {out_path.name}")
+        except Exception as exc:
+            print(f"Failed {path.name}: {exc}")
 
 
-# ============================================================
-#                         SKINART
-# ============================================================
+# ---------------------------------------------------------------------------
+# Skin art
+# ---------------------------------------------------------------------------
 
-def _crop_for_skinart(image, align):
-    """Return the 72x24 resized crop according to align (1=top, 2=center, 3=bottom)."""
+
+def _crop_for_skinart(image: Image.Image, align: str) -> Image.Image:
+    """Return a 72×24 resized crop (1=top, 2=center, 3=bottom)."""
     ow, oh = image.size
     tw, th = 72, 24
     target_aspect = tw / th
@@ -942,7 +956,7 @@ def _crop_for_skinart(image, align):
     return cropped.resize((tw, th), Image.Resampling.NEAREST)
 
 
-def run_skinart():
+def run_skinart() -> None:
     images = ask_files(images_only=True)
     if images is None:
         return
@@ -950,16 +964,15 @@ def run_skinart():
     if len(images) > 1:
         print("Using first image only.")
 
-    if not os.path.isfile(TEMPLATE_PATH):
+    if not TEMPLATE_PATH.is_file():
         print(f"Template missing: {TEMPLATE_PATH}")
         _download_or_create_template()
-        if not os.path.isfile(TEMPLATE_PATH):
+        if not TEMPLATE_PATH.is_file():
             print("Could not obtain template.")
             return
 
-    # Interactive alignment with preview
     align = "2"
-    preview_path = None
+    preview_path: Optional[Path] = None
     try:
         image = Image.open(path).convert("RGBA")
         while True:
@@ -972,23 +985,21 @@ def run_skinart():
                 continue
             align = choice
             preview = _crop_for_skinart(image, align)
-            # Save temp preview
-            preview_path = os.path.join(
-                get_effective_output_dir(), f"_preview_skinart_{os.getpid()}.png"
+            preview_path = (
+                get_effective_output_dir() / f"_preview_skinart_{os.getpid()}.png"
             )
             preview.save(preview_path)
             print(f"Preview saved: {preview_path}")
             open_preview(preview_path)
             if confirm("Use this alignment?"):
                 break
-            # Allow changing again
-    except Exception as e:
-        print(f"Preview failed: {e}")
+    except Exception as exc:
+        print(f"Preview failed: {exc}")
         return
     finally:
-        if preview_path and os.path.isfile(preview_path):
+        if preview_path and preview_path.is_file():
             try:
-                os.remove(preview_path)
+                preview_path.unlink()
             except Exception:
                 pass
 
@@ -999,23 +1010,22 @@ def run_skinart():
     if out_mode == "output":
         base_out = get_effective_output_dir()
         folder_name = input("Output subfolder name [skinart]: ").strip() or "skinart"
-        output_folder = os.path.join(base_out, folder_name)
+        output_folder = base_out / folder_name
     else:
-        output_folder = input("Output folder name (relative to script): ").strip()
-        if not output_folder:
+        folder_name = input("Output folder name (relative to script): ").strip()
+        if not folder_name:
             print("No folder name.")
             return
-        output_folder = os.path.join(SCRIPT_DIR, output_folder)
+        output_folder = SCRIPT_DIR / folder_name
 
-    if os.path.exists(output_folder):
+    if output_folder.exists():
         print("Folder already exists.")
         return
-
     if not confirm(f"Generate skin art into '{output_folder}'?"):
         return
 
     backup_file(path)
-    os.makedirs(output_folder)
+    output_folder.mkdir(parents=True)
 
     resized = _crop_for_skinart(image, align)
     template = Image.open(TEMPLATE_PATH).convert("RGBA")
@@ -1027,33 +1037,21 @@ def run_skinart():
             part = resized.crop((x, y, x + chunk, y + chunk))
             skin = template.copy()
             skin.paste(part, (8, 8), part if part.mode == "RGBA" else None)
-            skin.save(os.path.join(output_folder, f"skin{n}.png"))
+            skin.save(output_folder / f"skin{n}.png")
             n += 1
     print(f"Saved {n - 1} skins → {output_folder}")
 
 
-# ============================================================
-#                         SKYMAKER (simplified)
-# ============================================================
-
-SKY_ASSET_NAMES = [
-    "skybox.png",
-    "skybox2.png",
-    "cloud1.png",
-    "cloud2.png",
-    "starfield01.png",
-    "starfield02.png",
-    "starfield03.png",
-    "starfield.png",
-]
+# ---------------------------------------------------------------------------
+# Sky maker (simplified)
+# ---------------------------------------------------------------------------
 
 
-def run_sky():
+def run_sky() -> None:
     images = ask_files(images_only=True)
     if images is None:
         return
 
-    # Simple options with optional preview of the source (user can re-pick)
     while True:
         print("\n--- Sky options ---")
         print("These settings are kept for compatibility; the simplified")
@@ -1066,14 +1064,12 @@ def run_sky():
         h_flip = input("Horizontal flip? [y/N]: ").strip().lower() in ("y", "yes")
         v_flip = input("Vertical flip? [y/N]: ").strip().lower() in ("y", "yes")
 
-        # Preview first image with current flips
         try:
             preview = Image.open(images[0]).convert("RGB")
             if h_flip:
                 preview = preview.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
             if v_flip:
                 preview = preview.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-            # Downscale for quick preview if huge
             max_prev = 1024
             w, h = preview.size
             if max(w, h) > max_prev:
@@ -1081,21 +1077,21 @@ def run_sky():
                 preview = preview.resize(
                     (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
                 )
-            preview_path = os.path.join(
-                get_effective_output_dir(), f"_preview_sky_{os.getpid()}.png"
+            preview_path = (
+                get_effective_output_dir() / f"_preview_sky_{os.getpid()}.png"
             )
             preview.save(preview_path)
             print(f"Preview: {preview_path}")
             open_preview(preview_path)
             ok = confirm("Use these settings?")
             try:
-                os.remove(preview_path)
+                preview_path.unlink()
             except Exception:
                 pass
             if ok:
                 break
-        except Exception as e:
-            print(f"Preview failed: {e}")
+        except Exception as exc:
+            print(f"Preview failed: {exc}")
             if not confirm("Continue without preview?"):
                 return
             break
@@ -1104,10 +1100,11 @@ def run_sky():
     if out_mode is None:
         return
 
-    if out_mode == "output":
-        out_base = get_effective_output_dir()
-    else:
-        out_base = os.path.dirname(os.path.abspath(images[0]))
+    out_base = (
+        get_effective_output_dir()
+        if out_mode == "output"
+        else images[0].parent
+    )
 
     if not confirm(f"Generate sky packs for {len(images)} image(s)?"):
         return
@@ -1116,13 +1113,12 @@ def run_sky():
         backup_file(path)
         try:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            sky_dir = os.path.join(out_base, f"sky_{stamp}")
-            # Avoid collision if multiple images processed in the same second
+            sky_dir = out_base / f"sky_{stamp}"
             n = 1
-            while os.path.exists(sky_dir):
-                sky_dir = os.path.join(out_base, f"sky_{stamp}_{n}")
+            while sky_dir.exists():
+                sky_dir = out_base / f"sky_{stamp}_{n}"
                 n += 1
-            os.makedirs(sky_dir)
+            sky_dir.mkdir(parents=True)
 
             img = Image.open(path).convert("RGB")
             if h_flip:
@@ -1130,7 +1126,6 @@ def run_sky():
             if v_flip:
                 img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
 
-            # Optionally downscale so longest edge == face_size
             w, h = img.size
             longest = max(w, h)
             if longest > face_size:
@@ -1141,105 +1136,104 @@ def run_sky():
                 )
 
             for name in SKY_ASSET_NAMES:
-                dest = os.path.join(sky_dir, name)
-                img.save(dest, "PNG")
+                img.save(sky_dir / name, "PNG")
             print(f"Created {sky_dir} ({len(SKY_ASSET_NAMES)} assets)")
-        except Exception as e:
-            print(f"Failed {os.path.basename(path)}: {e}")
+        except Exception as exc:
+            print(f"Failed {path.name}: {exc}")
 
 
-# ============================================================
-#                     FILE CONTENT REPLACER
-# ============================================================
+# ---------------------------------------------------------------------------
+# File content replacer
+# ---------------------------------------------------------------------------
 
-def run_file_content_replacer():
-    """Replace the content of recursively found files using a user-provided text file."""
+
+def run_file_content_replacer() -> None:
+    """
+    Replace the content of selected files with the text from a source .txt.
+
+    Target selection uses the same 3-option picker as every other file tool.
+    An optional extension filter can further narrow the list.
+    """
     print("\n--- File Content Replacer ---")
     print("Provide a .txt file containing the replacement content.")
-    print("Then choose the file extension whose contents should be replaced.")
-    print("Example extension: .license or license")
+    print("Then select the target files (same 3 input types as other tools).")
     print("0. Back")
 
-    source_path = input("Source .txt file path: ").strip()
-
-    if source_path == "0":
+    source_raw = input("Source .txt file path: ").strip()
+    if source_raw in ("0", ""):
         return
 
-    if not source_path:
-        print("No source file provided.")
-        return
-
-    source_path = os.path.abspath(os.path.expanduser(source_path))
-
-    if not os.path.isfile(source_path):
+    source_path = Path(source_raw).expanduser().resolve()
+    if not source_path.is_file():
         print(f"File not found: {source_path}")
         return
 
     try:
-        with open(source_path, "r", encoding="utf-8") as f:
-            replacement_content = f.read()
-    except Exception as e:
-        print(f"Could not read source file: {e}")
+        replacement_content = source_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        print(f"Could not read source file: {exc}")
         return
 
-    extension = input("Target file extension (e.g. .license): ").strip()
-
-    if extension == "0":
+    print("\nSelect target files:")
+    targets = ask_files(images_only=False)
+    if targets is None:
         return
 
-    if not extension:
-        print("No extension provided.")
+    # Optional extension filter
+    ext_filter = input(
+        "Optional extension filter (e.g. .license, leave empty for all): "
+    ).strip()
+    if ext_filter == "0":
+        return
+    if ext_filter:
+        if not ext_filter.startswith("."):
+            ext_filter = "." + ext_filter
+        if any(c in ext_filter for c in "*?/\\"):
+            print("Invalid file extension.")
+            return
+        targets = [p for p in targets if p.suffix.lower() == ext_filter.lower()]
+        if not targets:
+            print(f"No files matching extension '{ext_filter}'.")
+            return
+
+    # Never overwrite the source itself
+    targets = [p for p in targets if p.resolve() != source_path]
+
+    if not targets:
+        print("No target files remaining.")
         return
 
-    if not extension.startswith("."):
-        extension = "." + extension
+    print(f"\nFound {len(targets)} file(s):")
+    for p in targets:
+        print(f"  {p}")
 
-    # Prevent accidental wildcard-like input.
-    if any(char in extension for char in "*?/\\"):
-        print("Invalid file extension.")
-        return
-
-    matches = []
-    for path in Path(".").rglob(f"*{extension}"):
-        if path.is_file():
-            # Never overwrite the source text file if it happens to match.
-            if os.path.abspath(str(path)) != source_path:
-                matches.append(path)
-
-    if not matches:
-        print(f"No files with extension '{extension}' found.")
-        return
-
-    print(f"\nFound {len(matches)} file(s):")
-    for path in matches:
-        print(f"  {path}")
-
-    if not confirm(f"Replace the content of {len(matches)} file(s) with '{os.path.basename(source_path)}'?"):
+    if not confirm(
+        f"Replace the content of {len(targets)} file(s) "
+        f"with '{source_path.name}'?"
+    ):
         return
 
     print()
-
-    success = 0
-    failed = 0
-
-    for path in matches:
+    success = failed = 0
+    for path in targets:
         try:
-            backup_file(str(path))
+            backup_file(path)
             path.write_text(replacement_content, encoding="utf-8")
             print(f"Updated: {path}")
             success += 1
-        except Exception as e:
-            print(f"Failed: {path} -> {e}")
+        except Exception as exc:
+            print(f"Failed: {path} -> {exc}")
             failed += 1
 
     print(f"\nCompleted: {success} updated, {failed} failed.")
 
 
-# ============================================================
-#                    SETTINGS MENU
-# ============================================================
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
 
-def run_settings():
+
+def run_settings() -> None:
     while True:
         settings = load_settings()
         print("\nCurrent settings:")
@@ -1256,7 +1250,7 @@ def run_settings():
             return
         if choice == "1":
             path = input("New input folder path: ").strip()
-            if path and os.path.isdir(path):
+            if path and Path(path).is_dir():
                 if confirm("Save this input folder?"):
                     save_setting("input_folder", path)
                     print("Saved.")
@@ -1264,7 +1258,7 @@ def run_settings():
                 print("Invalid or missing directory.")
         elif choice == "2":
             path = input("New output folder path: ").strip()
-            if path and os.path.isdir(path):
+            if path and Path(path).is_dir():
                 if confirm("Save this output folder?"):
                     save_setting("output_folder", path)
                     print("Saved.")
@@ -1302,29 +1296,29 @@ def run_settings():
             print("Invalid.")
 
 
-# ============================================================
-#                         MAIN
-# ============================================================
+# ---------------------------------------------------------------------------
+# Main menu (sorted by category)
+# ---------------------------------------------------------------------------
 
-def main():
+
+def main() -> None:
     ensure_folders()
-    # Session/backup folder is created lazily only when backup_file is first called
 
     while True:
         print("\n-------- Faltu by Ecoson --------")
-        print("1.  Recolor image(s)")
-        print("2.  Generate Minecraft Skin Art")
-        print("3.  Generate Minecraft Sky")
-        print("4.  Minecraft Username -> UUID")
-        print("5.  Minecraft UUID -> Username")
-        print("6.  Download Minecraft Skin")
-        print("7.  NameMC Profile")
-        print("8.  Compress image(s)")
-        print("9.  Share files (Filebin)")
-        print("10. Shorten link")
-        print("11. Settings")
-        print("12. Replace file contents")
-        print("0.  Exit")
+        print("1. Recolor image(s)")
+        print("2. Compress image(s) (Tinify)")
+        print("3. Generate Minecraft Skin Art")
+        print("4. Generate Minecraft Sky")
+        print("5. Username -> UUID")
+        print("6. UUID -> Username")
+        print("7. Download Minecraft skin and cape")
+        print("8. NameMC profile")
+        print("9. Share files (Filebin)")
+        print("10. Shorten link (TinyURL)")
+        print("11. Replace file contents")
+        print("12. Settings")
+        print("0. Exit")
         choice = input("Choice: ").strip()
 
         if choice == "0":
@@ -1333,27 +1327,27 @@ def main():
         elif choice == "1":
             run_recolor()
         elif choice == "2":
-            run_skinart()
-        elif choice == "3":
-            run_sky()
-        elif choice == "4":
-            run_username_to_uuid()
-        elif choice == "5":
-            run_uuid_to_username()
-        elif choice == "6":
-            run_download_skin()
-        elif choice == "7":
-            run_namemc()
-        elif choice == "8":
             run_tinify()
+        elif choice == "3":
+            run_skinart()
+        elif choice == "4":
+            run_sky()
+        elif choice == "5":
+            run_username_to_uuid()
+        elif choice == "6":
+            run_uuid_to_username()
+        elif choice == "7":
+            run_download_skin()
+        elif choice == "8":
+            run_namemc()
         elif choice == "9":
             run_filebin()
         elif choice == "10":
             run_tinyurl()
         elif choice == "11":
-            run_settings()
-        elif choice == "12":
             run_file_content_replacer()
+        elif choice == "12":
+            run_settings()
         else:
             print("Invalid.")
 
